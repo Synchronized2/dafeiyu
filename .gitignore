@@ -1,0 +1,17 @@
+# Local configuration and runtime data
+.local/
+__pycache__/
+*.py[cod]
+.venv*/
+.python-deps/
+.native-deps/
+.windows-runtime/
+# Large distributions and downloaded animation frames live in GitHub Releases.
+assets/pet/
+dist/
+*.part
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

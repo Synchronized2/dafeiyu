@@ -1,0 +1,10 @@
+Codex 大肥鱼 1.0.0 — Windows 10/11 x64
+
+完整解压后双击 Codex大肥鱼.cmd，无需安装 Python、Node.js 或配置 API Key。
+只想玩桌宠：双击 独立陪伴.cmd。
+右键可切换跟随任务、选择动作、调整设置；退出选择“本次关闭”。
+请保留完整目录结构，在本地可写文件夹运行。
+配置与日志在 .local 文件夹，不随发行包提供。
+源码与使用说明：https://github.com/Synchronized2/dafeiyu
+下载：https://github.com/Synchronized2/dafeiyu/releases/latest
+代码为 MIT；社区扩展动作受独立非商业条款约束，详见 ASSET_LICENSE.md。

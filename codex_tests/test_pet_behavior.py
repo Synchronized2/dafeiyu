@@ -5,12 +5,46 @@ import tempfile
 import unittest
 
 from runtime.layout_store import load_layout, normalise_layout, save_layout
-from runtime.pet_behavior import WanderMotion, head_crop, nearest_screen_index, perch_side
+from runtime.pet_behavior import WanderMotion, head_crop, nearest_screen_index, perch_side, perch_edge, perched_position
 from runtime.pet_motion import Bounds
 from runtime.pet_geometry import position_window
 
 
 class DesktopGeometryTests(unittest.TestCase):
+    def test_four_edge_detection_and_nearest_corner(self):
+        bounds = Bounds(-200, -100, 800, 700)
+        for point, expected in (((-195, 200), 'left'), ((795, 200), 'right'),
+                                ((300, -95), 'top'), ((300, 695), 'bottom'),
+                                ((-190, -98), 'top'), ((-198, -98), 'left')):
+            self.assertEqual(perch_edge(*point, (200, 260), bounds), expected)
+        self.assertIsNone(perch_edge(300, 300, (200, 260), bounds))
+        self.assertIsNone(perch_edge(300, -80, (200, 40), bounds))
+
+    def test_perched_heads_align_to_all_edges_of_negative_monitor(self):
+        screen = (-1920, -1080, 1920, 1080)
+        visible = (8, 12, 96, 120)
+        for side in ('left', 'right', 'top', 'bottom'):
+            x, y = perched_position(side, (-1000, -500), visible, screen)
+            if side == 'left':
+                self.assertEqual(x + visible[0], -1920)
+            elif side == 'right':
+                self.assertEqual(x + visible[0] + visible[2], 0)
+            elif side == 'top':
+                self.assertEqual(y + visible[1], -1080)
+            else:
+                self.assertEqual(y + visible[1] + visible[3], 0)
+            self.assertTrue(-1920 <= x + visible[0] <= -visible[2])
+            self.assertTrue(-1080 <= y + visible[1] <= -visible[3])
+
+    def test_top_and_bottom_edges_survive_layout_roundtrip(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'layout.json'
+            for edge in ('top', 'bottom'):
+                save_layout(path, dict(perchedEdge=edge, perchScale=1.37, petX=-500, petY=-50))
+                layout = load_layout(path)
+                self.assertEqual(layout['perchedEdge'], edge)
+                self.assertEqual(layout['perchScale'], 1.37)
+
     def test_transparent_padding_can_pass_screen_edge_without_clipping_body(self):
         screen = (-1920, 0, 1920, 1080)
         visible = (200, 40, 260, 290)

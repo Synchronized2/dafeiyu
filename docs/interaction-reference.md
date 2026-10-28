@@ -13,3 +13,5 @@
 代码许可为 MIT，保留 © 2026 Du Haoze（Windows port）和 © 2026 LIN428924379（original Android app）。完整上游许可（含其媒体例外）随附于 [Baifanyu-For-Win-LICENSE.txt](../assets/community-notices/Baifanyu-For-Win-LICENSE.txt)。未导入其美术、图标或音效；大肥鱼已有媒体仍遵循各自来源条款。
 
 显示实现补充：人物窗口按当前帧 alpha 阈值裁切，忽略近乎透明的残留像素，维持原动画锚点；状态卡使用独立且鼠标穿透的工具窗口，避免气泡参与拖拽与边缘碰撞。
+
+四边扒边为本项目的扩展：参考项目原有左右扒边；顶部将自有头部旋转 180° 向下探出，底部保持直立向上探出，统一使用工作区边界。

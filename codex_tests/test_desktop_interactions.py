@@ -239,6 +239,45 @@ def probe(dpi_only=False):
             if window.perched_edge is not None or playback() != saved_playback:
                 raise AssertionError('Come-out menu did not restore the original animation')
 
+            # Top and bottom use the same release detection, size preference and
+            # restore path as the side edges, with an upright/downward head.
+            for edge in ('top', 'bottom'):
+                bounds = window._motion_bounds()
+                target_y = bounds.top + 2 if edge == 'top' else bounds.bottom - 2
+                window._move_to_pet(round((bounds.left + bounds.right) / 2), round(target_y))
+                if not window._try_perch() or window.perched_edge != edge:
+                    raise AssertionError(f'{edge}: slow placement did not perch')
+                if window._pet_size()[0] <= window._pet_size()[1]:
+                    raise AssertionError(f'{edge}: head kept a sideways aspect ratio')
+                save('perch-' + edge)
+                for size in (.5, 1.5, 2.0):
+                    window._set_preference('perch_scale', size)
+                    vx, vy, vw, vh = window._pet_visible_rect()
+                    area = window.screen().availableGeometry()
+                    actual = window.pet_y + vy if edge == 'top' else window.pet_y + vy + vh
+                    expected = area.y() if edge == 'top' else area.y() + area.height()
+                    if abs(actual - expected) > 1:
+                        raise AssertionError(f'{edge}: resizing detached the head from the edge')
+                window._set_preference('perch_scale', 1.0)
+                window._refresh_display()
+                stored = load_layout(window.layout_path)
+                anchor = window.pet_x, window.pet_y
+                window._leave_perch()
+                if playback() != saved_playback:
+                    raise AssertionError(f'{edge}: leaving lost manual playback')
+                window.layout = stored
+                window._restore_visible_position()
+                if window.perched_edge != edge or (window.pet_x, window.pet_y) != anchor:
+                    raise AssertionError(f'{edge}: restart moved or lost the perched head')
+                window._begin_drag()
+                if window.perched_edge or not window.dragging:
+                    raise AssertionError(f'{edge}: pulling out did not restore the full character')
+                window._finish_drag()
+                window.model.clear_motion()
+                window.model.play_manual_action('extra_cube', repeat=True)
+                window.model.advance(133, window._now_ms())
+                saved_playback = playback()
+
             # Trigger real mouse event handlers, including pulling the head away from its edge.
             window._move_to_pet(round(bounds.left + 4), round(bounds.top + 100))
             window._try_perch()

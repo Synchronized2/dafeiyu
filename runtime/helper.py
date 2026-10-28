@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 try:
-    from .pet_behavior import CARING_WORDS, WanderMotion, head_crop, nearest_screen_index, perch_side
+    from .pet_behavior import CARING_WORDS, WanderMotion, head_crop, nearest_screen_index, perch_edge, perched_position
     from .display_support import enable_per_monitor_dpi
     from .animation_model import AnimationModel
     from .layout_store import default_layout_path, load_layout, save_layout
@@ -29,7 +29,7 @@ try:
     from .pet_motion import Bounds, DragTrail, ThrowMotion
     from .action_library import actions_for, load_pet_manifest
 except ImportError:
-    from pet_behavior import CARING_WORDS, WanderMotion, head_crop, nearest_screen_index, perch_side
+    from pet_behavior import CARING_WORDS, WanderMotion, head_crop, nearest_screen_index, perch_edge, perched_position
     from display_support import enable_per_monitor_dpi
     from animation_model import AnimationModel
     from layout_store import default_layout_path, load_layout, save_layout
@@ -678,7 +678,7 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             crop = head_crop(tuple(manifest.get("originalFrameRect", (0, 0, source.width(), source.height()))))
             factor = self.raster_factor
             head = source.copy(*(round(value * factor) for value in crop))
-            angle = 90 if self.perched_edge == "left" else -90
+            angle = {"left": 90, "right": -90, "top": 180, "bottom": 0}[self.perched_edge]
             return head.transformed(QTransform().rotate(angle), Qt.TransformationMode.SmoothTransformation)
 
         def _pet_contains(self, local: QPoint) -> bool:
@@ -742,27 +742,30 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
                     or self.model.base_state not in {"IDLE", "DISCONNECTED", "THINKING", "WORKING"}):
                 return False
             bounds = self._motion_bounds()
-            side = perch_side(self.pet_x, self._pet_size()[0], bounds, self.scale) if bounds else None
+            side = perch_edge(self.pet_x, self.pet_y, self._pet_visible_rect()[2:], bounds, self.scale) if bounds else None
             if side is None:
                 return False
             self._enter_perch(side)
             return True
 
         def _enter_perch(self, side: str, *, save: bool = True) -> None:
-            if side not in {"left", "right"}:
+            if side not in {"left", "right", "top", "bottom"}:
                 return
-            screen = self._screen_for_point(self.pet_x + self._pet_size()[0] // 2, self.pet_y)
+            vx, vy, vw, vh = self._pet_visible_rect()
+            screen = self._screen_for_point(self.pet_x + vx + vw // 2, self.pet_y + vy + vh // 2)
             if screen is None:
                 return
+            vx, vy, vw, vh = self._pet_visible_rect()
+            center_x, center_y = self.pet_x + vx + vw / 2, self.pet_y + vy + vh / 2
             self._stop_wander()
             self.perched_edge = side
             self.drag_tilt = 0
             self._play_motion_animation(self.model.state_map["IDLE"])
             self._apply_window_size()
-            geometry = screen.availableGeometry()
-            vx, _, vw, _ = self._pet_visible_rect()
-            x = geometry.left() - vx if side == "left" else geometry.x() + geometry.width() - vx - vw
-            self._move_to_pet(x, self.pet_y, screen_hint=screen)
+            vx, vy, vw, vh = self._pet_visible_rect()
+            x, y = perched_position(side, (round(center_x - vx - vw / 2), round(center_y - vy - vh / 2)),
+                                     (vx, vy, vw, vh), screen.availableGeometry().getRect())
+            self._move_to_pet(x, y, screen_hint=screen)
             self.micro_timer.stop()
             if save:
                 self._save_layout()
@@ -771,17 +774,18 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             if self.perched_edge is None:
                 return
             side = self.perched_edge
-            screen = self._screen_for_point(self.pet_x, self.pet_y)
+            vx, vy, vw, vh = self._pet_visible_rect()
+            screen = self._screen_for_point(self.pet_x + vx + vw // 2, self.pet_y + vy + vh // 2)
+            center_x, center_y = self.pet_x + vx + vw / 2, self.pet_y + vy + vh / 2
             self.perched_edge = None
             self.model.advance(0, self._now_ms())
             self.model.clear_motion()
             self._apply_window_size()
-            x = self.pet_x
+            vx, vy, vw, vh = self._pet_visible_rect()
+            x, y = round(center_x - vx - vw / 2), round(center_y - vy - vh / 2)
             if screen:
-                geometry = screen.availableGeometry()
-                vx, _, vw, _ = self._pet_visible_rect()
-                x = geometry.left() - vx if side == "left" else geometry.x() + geometry.width() - vx - vw
-            self._move_to_pet(x, self.pet_y, screen_hint=screen)
+                x, y = perched_position(side, (x, y), (vx, vy, vw, vh), screen.availableGeometry().getRect())
+            self._move_to_pet(x, y, screen_hint=screen)
             self.last_touch_ms = self._now_ms()
             self._schedule_micro()
             self._save_layout()
@@ -827,7 +831,8 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             self.decoded_frames.clear()
             self._stop_wander()
             self._apply_window_size()
-            screen = self._screen_for_point(self.pet_x + self._pet_size()[0] // 2, self.pet_y)
+            vx, vy, vw, vh = self._pet_visible_rect()
+            screen = self._screen_for_point(self.pet_x + vx + vw // 2, self.pet_y + vy + vh // 2)
             if self.dragging:
                 pointer = QCursor.pos()
                 screen = self._screen_for_point(pointer.x(), pointer.y())
@@ -838,9 +843,8 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             else:
                 x, y = self.pet_x, self.pet_y
                 if self.perched_edge and screen:
-                    geometry = screen.availableGeometry()
-                    vx, _, vw, _ = self._pet_visible_rect()
-                    x = geometry.x() - vx if self.perched_edge == "left" else geometry.x() + geometry.width() - vx - vw
+                    x, y = perched_position(self.perched_edge, (x, y), self._pet_visible_rect(),
+                                             screen.availableGeometry().getRect())
             self._move_to_pet(x, y, screen_hint=screen)
             if self.throw_motion is not None:
                 bounds = self._motion_bounds()
@@ -974,7 +978,8 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
 
         def _motion_bounds(self) -> Bounds | None:
             width, height = self._pet_size()
-            geometry = self._screen_geometry_at(self.pet_x + width // 2, self.pet_y + height // 2)
+            vx, vy, vw, vh = self._pet_visible_rect()
+            geometry = self._screen_geometry_at(self.pet_x + vx + vw // 2, self.pet_y + vy + vh // 2)
             if geometry is None:
                 return None
             vx, vy, vw, vh = self._pet_visible_rect()
@@ -1144,7 +1149,8 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             if self.perched_edge:
                 _, _, head_width, head_height = head_crop(tuple(manifest.get("originalFrameRect", (0, 0, 412, 344))))
                 width = round(96 * self.scale * self.perch_scale)
-                return width, round(width * head_width / head_height)
+                length = round(width * head_width / head_height)
+                return (width, length) if self.perched_edge in {"left", "right"} else (length, width)
             return (
                 round(int(manifest["maxFrameWidth"]) * self.scale),
                 round(int(manifest["maxFrameHeight"]) * self.scale),
@@ -1152,7 +1158,8 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
 
         def _move_to_pet(self, pet_x: int, pet_y: int, *, screen_hint: Any = None) -> None:
             """Place the logical pet anchor on the cursor's monitor during a drag."""
-            selected = screen_hint or self._screen_for_point(pet_x + self._pet_size()[0] // 2, pet_y)
+            vx, vy, vw, vh = self._pet_visible_rect()
+            selected = screen_hint or self._screen_for_point(pet_x + vx + vw // 2, pet_y + vy + vh // 2)
             geometry = selected.availableGeometry() if selected is not None else None
             handle = self.windowHandle()
             if handle is not None and selected is not None and handle.screen() != selected:
@@ -1223,9 +1230,13 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
                     pet_y = geometry.bottom() - pet_height - 24
             preferred = next((screen for screen in QApplication.screens()
                               if screen.name() == self.layout.get("displayName")), None)
-            self._move_to_pet(pet_x, pet_y, screen_hint=preferred)
-            if self.perch_enabled and self.layout.get("perchedEdge") in {"left", "right"}:
+            if self.perch_enabled and self.layout.get("perchedEdge") in {"left", "right", "top", "bottom"}:
+                # Saved anchors already describe the compact head, not a full sprite.
+                self.perched_edge = self.layout["perchedEdge"]
+                self._move_to_pet(pet_x, pet_y, screen_hint=preferred)
                 self._enter_perch(self.layout["perchedEdge"], save=False)
+            else:
+                self._move_to_pet(pet_x, pet_y, screen_hint=preferred)
 
         def _save_layout(self) -> None:
             self.layout = {

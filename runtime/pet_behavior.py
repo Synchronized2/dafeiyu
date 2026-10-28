@@ -49,6 +49,39 @@ def perch_side(x: float, width: float, bounds: Bounds, scale: float = 1) -> str 
     return "left" if left_distance <= right_distance else "right"
 
 
+def perch_edge(x: float, y: float, visible_size: tuple[int, int], bounds: Bounds,
+               scale: float = 1) -> str | None:
+    """Pick the nearest eligible edge; corners use a deterministic horizontal tie."""
+    width, height = visible_size
+    candidates = (("left", abs(x - bounds.left), min(56 * scale, width * .25)),
+                  ("right", abs(x - bounds.right), min(56 * scale, width * .25)),
+                  ("top", abs(y - bounds.top), min(56 * scale, height * .25)),
+                  ("bottom", abs(y - bounds.bottom), min(56 * scale, height * .25)))
+    eligible = [(distance, index, edge) for index, (edge, distance, threshold) in enumerate(candidates)
+                if distance <= threshold]
+    return min(eligible)[2] if eligible else None
+
+
+def perched_position(edge: str, position: tuple[int, int], visible: tuple[int, int, int, int],
+                     screen: tuple[int, int, int, int]) -> tuple[int, int]:
+    """Align the visible head to a work-area edge, including negative monitors."""
+    x, y = position
+    vx, vy, width, height = visible
+    left, top, screen_width, screen_height = screen
+    bounds = Bounds(left - vx, top - vy, max(left - vx, left + screen_width - vx - width),
+                    max(top - vy, top + screen_height - vy - height))
+    x, y = bounds.clamp(x, y)
+    if edge == "left":
+        x = bounds.left
+    elif edge == "right":
+        x = bounds.right
+    elif edge == "top":
+        y = bounds.top
+    elif edge == "bottom":
+        y = bounds.bottom
+    return round(x), round(y)
+
+
 def head_crop(original: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
     """Head band measured on Dafeiyu's existing maid animation, in source pixels."""
     x, y, width, height = original

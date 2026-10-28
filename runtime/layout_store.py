@@ -79,7 +79,7 @@ def normalise_layout(value: Any) -> dict[str, Any]:
     for key in ("inertiaEnabled", "gravityEnabled", "edgeSnap", "perchEnabled", "hoverEnabled", "wanderEnabled"):
         if isinstance(value.get(key), bool):
             layout[key] = value[key]
-    if value.get("perchedEdge") in {"left", "right"}:
+    if value.get("perchedEdge") in {"left", "right", "top", "bottom"}:
         layout["perchedEdge"] = value["perchedEdge"]
     if isinstance(value.get("displayName"), str):
         layout["displayName"] = value["displayName"][:256]

@@ -240,7 +240,7 @@ class PetSettings(QDialog):
         for name, text in (("inertia_enabled", "惯性甩抛与反弹"),
                            ("gravity_enabled", "甩抛响应重力"),
                            ("edge_snap", "靠近屏幕边缘时吸附"),
-                           ("perch_enabled", "慢放到左右边缘时扒边"),
+                           ("perch_enabled", "慢放到屏幕四边时扒边"),
                            ("hover_enabled", "鼠标停留时显示时间与关心话"),
                            ("wander_enabled", "空闲时自动溜达"),
                            ("reduced_motion", "减少动态")):
@@ -254,7 +254,7 @@ class PetSettings(QDialog):
         gravity_hint.setObjectName("settingHint")
         gravity_hint.setWordWrap(True)
         behavior.addWidget(gravity_hint)
-        interaction_hint = QLabel("拖拽时随方向倾斜；慢放到左右边缘会只露出脑袋，拖出来或点“出来玩”即可恢复。悬停时暂停溜达，任务进行中和手动播放时也会暂停。", self)
+        interaction_hint = QLabel("拖拽时随方向倾斜；慢放到屏幕四边会只露出脑袋，顶部向下探头、底部向上探头。拖出来或点“出来玩”即可恢复。悬停、任务进行中和手动播放时暂停溜达。", self)
         interaction_hint.setObjectName("settingHint")
         interaction_hint.setWordWrap(True)
         behavior.addWidget(interaction_hint)

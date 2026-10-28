@@ -58,6 +58,9 @@ class AnimationModel:
         self.overlay_clip_name: str | None = None
         self.manual_clip_name: str | None = None
         self.manual_repeat = False
+        self.motion_clip_name: str | None = None
+        self.motion_repeat = False
+        self._motion_resume: tuple[str, int, int] | None = None
         self.pulse_state: str | None = None
         self.pulse_deadline_ms: int | None = None
         self.pulse_clip_name: str | None = None
@@ -75,7 +78,10 @@ class AnimationModel:
 
     @property
     def overlay_remaining_ms(self) -> int:
-        if self.overlay_clip_name is None or self.active_clip.loop:
+        if self.motion_clip_name is not None:
+            if self.motion_repeat:
+                return 0
+        elif self.overlay_clip_name is None or self.active_clip.loop:
             return 0
         return (len(self.active_clip.frames) - self.frame_index) * self.active_clip.frame_ms - self.frame_elapsed_ms
 
@@ -99,7 +105,7 @@ class AnimationModel:
                 self.overlay_clip_name = None
                 self.manual_clip_name = None
                 self.manual_repeat = False
-        if self.overlay_clip_name is None:
+        if self.motion_clip_name is None and self.overlay_clip_name is None:
             self._activate(self._underlay_clip_name())
 
     def apply_pulse(
@@ -128,11 +134,33 @@ class AnimationModel:
             self.overlay_clip_name = None
             self.manual_clip_name = None
             self.manual_repeat = False
-        if self.overlay_clip_name is None:
+        if self.motion_clip_name is None and self.overlay_clip_name is None:
             self._activate(self.pulse_clip_name)
 
+    def play_motion(self, clip_name: str, *, repeat: bool = True) -> bool:
+        """Temporarily pause the current action without losing its playback position."""
+        if clip_name not in self.clips or not self.clips[clip_name].frames:
+            return False
+        if self.motion_clip_name is None:
+            self._motion_resume = (self.active_clip_name, self.frame_index, self.frame_elapsed_ms)
+        self.motion_clip_name = clip_name
+        self.motion_repeat = repeat
+        self._activate(clip_name)
+        return True
+
+    def clear_motion(self) -> None:
+        if self.motion_clip_name is None:
+            return
+        resume = self._motion_resume
+        self.motion_clip_name = None
+        self.motion_repeat = False
+        self._motion_resume = None
+        self._activate(self.overlay_clip_name or self._underlay_clip_name())
+        if resume is not None and self.active_clip_name == resume[0]:
+            self.frame_index, self.frame_elapsed_ms = resume[1:]
+
     def play_overlay(self, clip_name: str) -> bool:
-        if clip_name not in self.clips:
+        if self.motion_clip_name is not None or clip_name not in self.clips:
             return False
         self.overlay_clip_name = clip_name
         self.manual_clip_name = None
@@ -144,10 +172,11 @@ class AnimationModel:
         self.overlay_clip_name = None
         self.manual_clip_name = None
         self.manual_repeat = False
-        self._activate(self._underlay_clip_name())
+        if self.motion_clip_name is None:
+            self._activate(self._underlay_clip_name())
 
     def play_interaction(self, clip_name: str, now_ms: int) -> bool:
-        if clip_name not in INTERACTION_CLIPS or self.pulse_state is not None:
+        if self.motion_clip_name is not None or clip_name not in INTERACTION_CLIPS or self.pulse_state is not None:
             return False
         if self.overlay_clip_name in INTERACTION_CLIPS | DRAG_CLIPS:
             return False
@@ -160,7 +189,7 @@ class AnimationModel:
 
     def play_manual_action(self, clip_name: str, *, repeat: bool = False) -> bool:
         """Preview a real decorative action, keeping the newest task underneath."""
-        if (clip_name not in self.manual_actions or self.pulse_state is not None
+        if (self.motion_clip_name is not None or clip_name not in self.manual_actions or self.pulse_state is not None
                 or self.overlay_clip_name in DRAG_CLIPS or self.base_state in {"WAITING", "ERROR"}):
             return False
         self.clear_overlay()
@@ -171,7 +200,8 @@ class AnimationModel:
         return True
 
     def play_idle_micro(self, index: int = 0) -> bool:
-        if self.base_state != "IDLE" or self.overlay_clip_name is not None or self.pulse_state is not None:
+        if (self.motion_clip_name is not None or self.base_state != "IDLE"
+                or self.overlay_clip_name is not None or self.pulse_state is not None):
             return False
         if not self.idle_micro_clips:
             return False
@@ -188,7 +218,7 @@ class AnimationModel:
             self.pulse_state = None
             self.pulse_deadline_ms = None
             self.pulse_clip_name = None
-            if self.overlay_clip_name is None:
+            if self.motion_clip_name is None and self.overlay_clip_name is None:
                 self._activate(self.base_clip_name)
                 elapsed_ms = 0
 
@@ -199,8 +229,11 @@ class AnimationModel:
         next_frame = self.frame_index + steps
         if next_frame < len(clip.frames):
             self.frame_index = next_frame
-        elif clip.loop or (self.manual_repeat and self.manual_clip_name == self.active_clip_name):
+        elif (self.motion_repeat if self.motion_clip_name is not None else
+              clip.loop or (self.manual_repeat and self.manual_clip_name == self.active_clip_name)):
             self.frame_index = next_frame % len(clip.frames)
+        elif self.motion_clip_name is not None:
+            self.clear_motion()
         elif self.overlay_clip_name is not None:
             self.overlay_clip_name = None
             self.manual_clip_name = None

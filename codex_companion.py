@@ -24,6 +24,8 @@ from typing import Any
 from codex_platform import SingleInstance
 
 ROOT = Path(__file__).resolve().parent
+# Internal supervisor result; helper failures are always returned as positive codes.
+RESTART_REQUESTED = -1
 ACTIVE = {"THINKING", "WORKING", "WAITING"}
 PRIORITY = {"WAITING": 4, "WORKING": 3, "THINKING": 2, "ERROR": 1}
 QUESTION_TOOLS = {"request_user_input", "request_user_input_async"}
@@ -351,7 +353,11 @@ def main() -> int:
             print("Codex 大肥鱼已经在运行了。", file=sys.stderr)
             return 0
     try:
-        return run_companion(args, local)
+        # Keep the single-instance lock while replacing the native window and observer.
+        while True:
+            code = run_companion(args, local)
+            if code != RESTART_REQUESTED:
+                return code
     finally:
         lock.close()
 
@@ -380,6 +386,7 @@ def run_companion(args: argparse.Namespace, local: Path) -> int:
                              encoding="utf-8", bufsize=1, cwd=ROOT,
                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0)
     stopping = threading.Event()
+    restart_requested = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stopping.set())
     signal.signal(signal.SIGINT, lambda *_: stopping.set())
     ready = threading.Event()
@@ -394,6 +401,9 @@ def run_companion(args: argparse.Namespace, local: Path) -> int:
                 data = json.loads(line)
                 if data.get("kind") == "ready":
                     ready.set()
+                elif data.get("kind") == "restart":
+                    restart_requested.set()
+                    stopping.set()
                 elif data.get("kind") == "closed":
                     stopping.set()
                 elif data.get("kind") == "follow-codex" and isinstance(data.get("enabled"), bool):
@@ -418,7 +428,7 @@ def run_companion(args: argparse.Namespace, local: Path) -> int:
                 print(f"桌宠窗口未能启动，请查看 {local / 'helper.log'}", file=sys.stderr)
                 return 1
         send(message("hello", host="codex", message="BigFish connected to Codex"))
-        send(message("config", openUrl="codex://", openLabel="打开 Codex"))
+        send(message("config", openUrl="codex://", openLabel="打开 Codex", restartSupported=True))
         observer = None
         previous_mode = None
         demo = [
@@ -484,6 +494,10 @@ def run_companion(args: argparse.Namespace, local: Path) -> int:
     if child.returncode:
         print(f"桌宠窗口异常退出（退出码 {child.returncode}），请查看 {local / 'helper.log'}", file=sys.stderr)
         return child.returncode if child.returncode > 0 else 1
+    if restart_requested.is_set():
+        # Follow the mode selected in the menu, rather than the original CLI mode.
+        args.standalone = not follow_codex.is_set()
+        return RESTART_REQUESTED
     return 0
 
 

@@ -169,6 +169,7 @@ class PetSettings(QDialog):
         self.choices["activity_level"] = activity
         self.toggles: dict[str, QCheckBox] = {}
         for name, text in (("inertia_enabled", "惯性甩抛与反弹"),
+                           ("gravity_enabled", "甩抛响应重力"),
                            ("edge_snap", "靠近屏幕边缘时吸附"),
                            ("reduced_motion", "减少动态")):
             toggle = QCheckBox(text, self)
@@ -177,6 +178,10 @@ class PetSettings(QDialog):
             toggle.toggled.connect(lambda checked, name=name: companion._set_preference(name, checked))
             behavior.addWidget(toggle)
             self.toggles[name] = toggle
+        gravity_hint = QLabel("关闭重力后，只沿甩出方向移动、碰壁反弹并逐渐停下。", self)
+        gravity_hint.setObjectName("settingHint")
+        gravity_hint.setWordWrap(True)
+        behavior.addWidget(gravity_hint)
         idle_button = QPushButton('设置空闲随机动作…', self)
         idle_button.clicked.connect(companion._open_action_browser)
         behavior.addWidget(idle_button)

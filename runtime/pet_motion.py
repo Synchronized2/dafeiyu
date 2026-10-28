@@ -71,6 +71,7 @@ class ThrowMotion:
     bounds: Bounds
     elapsed: float = 0.0
     active: bool = True
+    gravity_enabled: bool = True
 
     def step(self, seconds: float) -> None:
         if not self.active or not math.isfinite(seconds) or seconds <= 0:
@@ -78,7 +79,10 @@ class ThrowMotion:
         # A suspended desktop must not produce a large off-screen jump.
         dt = min(.05, seconds)
         self.elapsed += dt
-        self.vy += 1150 * dt
+        if self.gravity_enabled:
+            self.vy += 1150 * dt
+        else:
+            self.vy *= math.exp(-.65 * dt)
         self.vx *= math.exp(-.65 * dt)
         self.x += self.vx * dt
         self.y += self.vy * dt
@@ -87,11 +91,16 @@ class ThrowMotion:
         elif self.x >= self.bounds.right:
             self.x, self.vx = self.bounds.right, -abs(self.vx) * .52
         if self.y <= self.bounds.top:
-            self.y, self.vy = self.bounds.top, abs(self.vy) * .45
+            self.y, self.vy = self.bounds.top, abs(self.vy) * (.45 if self.gravity_enabled else .52)
         elif self.y >= self.bounds.bottom:
             self.y = self.bounds.bottom
-            self.vy = -abs(self.vy) * .4 if abs(self.vy) > 90 else 0
-            self.vx *= math.exp(-7 * dt)
-        if (self.y >= self.bounds.bottom and abs(self.vx) < 12 and self.vy == 0) or self.elapsed >= 8:
+            if self.gravity_enabled:
+                self.vy = -abs(self.vy) * .4 if abs(self.vy) > 90 else 0
+                self.vx *= math.exp(-7 * dt)
+            else:
+                self.vy = -abs(self.vy) * .52
+        settled = (self.y >= self.bounds.bottom and abs(self.vx) < 12 and self.vy == 0
+                   if self.gravity_enabled else math.hypot(self.vx, self.vy) < 12)
+        if settled or self.elapsed >= 8:
             self.active = False
             self.vx = self.vy = 0

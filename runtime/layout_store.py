@@ -22,6 +22,7 @@ DEFAULT_LAYOUT: dict[str, Any] = {
     "bubbleMode": "always",
     "bubbleStates": ["SUCCESS", "ERROR", "WAITING"],
     "inertiaEnabled": True,
+    "gravityEnabled": True,
     "edgeSnap": True,
     "activityLevel": "normal",
     "idleActions": ["idle_stretch", "idle_yawn", "eat_token", "extra_cube", "extra_nap", "extra_dance"],
@@ -66,7 +67,7 @@ def normalise_layout(value: Any) -> dict[str, Any]:
         layout["bubbleMode"] = value["bubbleMode"]
     if isinstance(value.get("bubbleStates"), list):
         layout["bubbleStates"] = [str(state) for state in value["bubbleStates"] if isinstance(state, str)]
-    for key in ("inertiaEnabled", "edgeSnap"):
+    for key in ("inertiaEnabled", "gravityEnabled", "edgeSnap"):
         if isinstance(value.get(key), bool):
             layout[key] = value[key]
     if value.get("activityLevel") in {"quiet", "normal", "lively"}:

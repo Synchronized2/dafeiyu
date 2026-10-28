@@ -358,6 +358,7 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             self.sound_enabled = configured_sound_enabled != "0"
             self.activity_level = os.environ.get("DSH_DAFEIYU_ACTIVITY_LEVEL", self.layout["activityLevel"])
             self.inertia_enabled = self.layout["inertiaEnabled"]
+            self.gravity_enabled = self.layout["gravityEnabled"]
             self.edge_snap = self.layout["edgeSnap"]
             configured_bubble_mode = os.environ.get("DSH_DAFEIYU_BUBBLE_MODE")
             self.bubble_mode = (
@@ -373,6 +374,8 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             self.manifest = manifest
             self.menu_open = False
             self.follow_codex = True
+            self.restart_supported = False
+            self.restart_pending = False
             self.model = AnimationModel(manifest)
             self.idle_actions = [name for name in self.layout["idleActions"] if name in self.model.manual_actions]
             self.model.idle_micro_clips = tuple(self.idle_actions)
@@ -530,6 +533,7 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
                 self._stop_throw()
                 self.micro_timer.stop()
                 if not self.dragging:
+                    self.model.clear_motion()
                     self.model.clear_overlay()
             else:
                 self._schedule_micro()
@@ -540,6 +544,8 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
                 self.webui_url = message["openUrl"]
             if isinstance(message.get("openLabel"), str):
                 self.open_label = message["openLabel"]
+            if isinstance(message.get("restartSupported"), bool):
+                self.restart_supported = message["restartSupported"]
             if isinstance(message.get("followCodex"), bool):
                 self.follow_codex = message["followCodex"]
             scale = message.get("scale")
@@ -666,18 +672,18 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             # visible outlines even with correct frame clearing.
             self._pixmap(self.model.frame)
 
-        def _play_model_overlay(
+        def _play_motion_animation(
             self,
             clip_name: str,
             *,
-            allow_fade: bool = True,
+            repeat: bool = True,
             repaint: bool = True,
         ) -> bool:
             previous_frame = self.model.frame
             previous_clip = self.model.active_clip_name
-            if not self.model.play_overlay(clip_name):
+            if not self.model.play_motion(clip_name, repeat=repeat):
                 return False
-            self._sync_frame_transition(previous_frame, previous_clip, allow_fade=allow_fade)
+            self._sync_frame_transition(previous_frame, previous_clip, allow_fade=False)
             if repaint:
                 self.update()
             return True
@@ -687,7 +693,7 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
                 return
             self.dragging = True
             self.micro_timer.stop()
-            played = self._play_model_overlay("dragging", allow_fade=False, repaint=False)
+            played = self._play_motion_animation("dragging", repaint=False)
             if not played:
                 self.animation_timer.stop()
                 return
@@ -715,9 +721,13 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             bounds = self._motion_bounds()
             if bounds is None or self.reduced_motion or not self.inertia_enabled or (vx == 0 and vy == 0):
                 return False
-            self.throw_motion = ThrowMotion(self.pet_x, self.pet_y, vx, vy, bounds)
+            self.throw_motion = ThrowMotion(self.pet_x, self.pet_y, vx, vy, bounds,
+                                            gravity_enabled=self.gravity_enabled)
             self.micro_timer.stop()
-            self._play_model_overlay("dragging", allow_fade=False)
+            # Keep the startled reaction through every bounce until motion settles.
+            reaction = "throw_startled" if "throw_startled" in self.model.clips else "dragging"
+            self._play_motion_animation(reaction)
+            self.last_tick_ms = self._now_ms()
             self.motion_tick = time.monotonic()
             self.animation_timer.start(self._animation_interval_ms())
             self.motion_timer.start()
@@ -740,12 +750,18 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
                 return
             self.throw_motion = None
             self.motion_timer.stop()
+            previous_frame = self.model.frame
+            previous_clip = self.model.active_clip_name
+            now_ms = self._now_ms()
+            self.model.advance(0, now_ms)
+            self.model.clear_motion()
+            self.last_tick_ms = now_ms
+            self._sync_frame_transition(previous_frame, previous_clip, allow_fade=False)
+            self.animation_timer.start(self._animation_interval_ms())
             if landing:
-                self._play_model_overlay("dragging_release", allow_fade=False)
                 self._snap_to_edge()
-                self._schedule_micro()
-            else:
-                self.model.clear_overlay()
+            self._schedule_micro()
+            self.update()
             self._save_layout()
 
         def _finish_drag(self) -> None:
@@ -756,8 +772,8 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             previous_clip = self.model.active_clip_name
             # Expire an underlying pulse before revealing it after a long drag.
             self.model.advance(0, now_ms)
-            if self.reduced_motion or not self.model.play_overlay("dragging_release"):
-                self.model.clear_overlay()
+            if self.reduced_motion or not self.model.play_motion("dragging_release", repeat=False):
+                self.model.clear_motion()
             self._sync_frame_transition(previous_frame, previous_clip, allow_fade=False)
             self.dragging = False
             self.last_tick_ms = now_ms
@@ -883,6 +899,7 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
                 "bubbleMode": self.bubble_mode,
                 "bubbleStates": self.bubble_states,
                 "inertiaEnabled": self.inertia_enabled,
+                "gravityEnabled": self.gravity_enabled,
                 "edgeSnap": self.edge_snap,
                 "activityLevel": self.activity_level,
                 "idleActions": self.idle_actions,
@@ -1313,6 +1330,10 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
                 self.inertia_enabled = bool(value)
                 if not value:
                     self._stop_throw()
+            elif name == "gravity_enabled":
+                self.gravity_enabled = bool(value)
+                if self.throw_motion is not None:
+                    self.throw_motion.gravity_enabled = self.gravity_enabled
             elif name == "edge_snap":
                 self.edge_snap = bool(value)
             else:
@@ -1359,6 +1380,14 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
                 self.menu_open = False
                 self.update()
                 menu.deleteLater()
+
+        def _restart_pet(self) -> None:
+            if not self.restart_supported or self.restart_pending:
+                return
+            self.restart_pending = True
+            self._save_layout()
+            emit_reply("restart")
+            QApplication.quit()
 
         def _close_pet(self) -> None:
             self._save_layout()

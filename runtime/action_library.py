@@ -38,6 +38,15 @@ def load_pet_manifest(path: Path) -> dict[str, Any]:
         if data.get("frameCanvas"):
             manifest["maxFrameWidth"], manifest["maxFrameHeight"] = data["frameCanvas"]
             manifest["originalFrameRect"] = data["originalFrameRect"]
+    # The pinned community clip has a neutral lead-in and a calm recovery.
+    # Reuse only its frightened section for immediate, continuous throw feedback.
+    startled = manifest["clips"].get("extra_jump_scare")
+    if startled and len(startled["frames"]) >= 127:
+        manifest["clips"]["throw_startled"] = {
+            "frames": startled["frames"][38:127],
+            "frameMs": startled["frameMs"],
+            "loop": True,
+        }
     manifest["manualActions"] = [key for key, *_ in manifest.get("actionCatalog", ACTION_CATALOG)
                                  if key in manifest["clips"]]
     return manifest

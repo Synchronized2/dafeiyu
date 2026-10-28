@@ -68,6 +68,11 @@ class PetMenu(QMenu):
         self.follow.setToolTip('关闭后只当桌宠使用；开启后自动跟随本机 Codex 任务。')
         self.follow.toggled.connect(lambda enabled: self._run(lambda: companion._set_follow_codex(enabled)))
         layout.addWidget(self.follow)
+        if companion.perched_edge:
+            emerge = QPushButton("出来玩", body)
+            emerge.setObjectName("leavePerch")
+            emerge.clicked.connect(lambda: self._run(companion._leave_perch))
+            layout.addWidget(emerge)
         row = QHBoxLayout()
         for text, callback in (("桌宠设置…", companion._open_settings), ("回到右下角", companion._go_home)):
             button = QPushButton(text, body)

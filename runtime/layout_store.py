@@ -24,6 +24,12 @@ DEFAULT_LAYOUT: dict[str, Any] = {
     "inertiaEnabled": True,
     "gravityEnabled": True,
     "edgeSnap": True,
+    "perchEnabled": True,
+    "perchScale": 1.0,
+    "hoverEnabled": True,
+    "wanderEnabled": True,
+    "perchedEdge": None,
+    "displayName": "",
     "activityLevel": "normal",
     "idleActions": ["idle_stretch", "idle_yawn", "eat_token", "extra_cube", "extra_nap", "extra_dance"],
 }
@@ -55,10 +61,13 @@ def normalise_layout(value: Any) -> dict[str, Any]:
             layout[key] = coordinate
     scale = value.get("scale")
     if isinstance(scale, (int, float)) and not isinstance(scale, bool):
-        layout["scale"] = min(1.4, max(0.55, float(scale)))
+        layout["scale"] = min(1.8, max(0.4, float(scale)))
     bubble_scale = value.get("bubbleScale")
     if isinstance(bubble_scale, (int, float)) and not isinstance(bubble_scale, bool):
-        layout["bubbleScale"] = min(1.2, max(0.8, float(bubble_scale)))
+        layout["bubbleScale"] = min(1.6, max(0.6, float(bubble_scale)))
+    perch_scale = value.get("perchScale")
+    if isinstance(perch_scale, (int, float)) and not isinstance(perch_scale, bool):
+        layout["perchScale"] = min(2.0, max(.5, float(perch_scale)))
     if isinstance(value.get("reducedMotion"), bool):
         layout["reducedMotion"] = value["reducedMotion"]
     if value.get("renderProfile") in {"bright", "natural", "original"}:
@@ -67,9 +76,13 @@ def normalise_layout(value: Any) -> dict[str, Any]:
         layout["bubbleMode"] = value["bubbleMode"]
     if isinstance(value.get("bubbleStates"), list):
         layout["bubbleStates"] = [str(state) for state in value["bubbleStates"] if isinstance(state, str)]
-    for key in ("inertiaEnabled", "gravityEnabled", "edgeSnap"):
+    for key in ("inertiaEnabled", "gravityEnabled", "edgeSnap", "perchEnabled", "hoverEnabled", "wanderEnabled"):
         if isinstance(value.get(key), bool):
             layout[key] = value[key]
+    if value.get("perchedEdge") in {"left", "right"}:
+        layout["perchedEdge"] = value["perchedEdge"]
+    if isinstance(value.get("displayName"), str):
+        layout["displayName"] = value["displayName"][:256]
     if value.get("activityLevel") in {"quiet", "normal", "lively"}:
         layout["activityLevel"] = value["activityLevel"]
     if isinstance(value.get("idleActions"), list):

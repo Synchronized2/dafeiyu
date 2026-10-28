@@ -8,6 +8,7 @@ independent desktop application.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import json
 import os
 import random
@@ -19,6 +20,8 @@ from pathlib import Path
 from typing import Any, TextIO
 
 try:
+    from .pet_behavior import CARING_WORDS, WanderMotion, head_crop, nearest_screen_index, perch_side
+    from .display_support import enable_per_monitor_dpi
     from .animation_model import AnimationModel
     from .layout_store import default_layout_path, load_layout, save_layout
     from .asset_paths import bundle_root
@@ -26,6 +29,8 @@ try:
     from .pet_motion import Bounds, DragTrail, ThrowMotion
     from .action_library import actions_for, load_pet_manifest
 except ImportError:
+    from pet_behavior import CARING_WORDS, WanderMotion, head_crop, nearest_screen_index, perch_side
+    from display_support import enable_per_monitor_dpi
     from animation_model import AnimationModel
     from layout_store import default_layout_path, load_layout, save_layout
     from asset_paths import bundle_root
@@ -237,9 +242,10 @@ def run_headless(recorder: EventRecorder) -> int:
 
 def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> int:
     configure_qt_platform()
+    enable_per_monitor_dpi()
     try:
-        from PySide6.QtCore import QAbstractNativeEventFilter, QObject, QPoint, QRectF, Qt, QTimer, QUrl, Signal
-        from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontMetrics, QMouseEvent, QPainter, QPen, QPixmap
+        from PySide6.QtCore import QAbstractNativeEventFilter, QEvent, QObject, QPoint, QRectF, Qt, QTimer, QUrl, Signal
+        from PySide6.QtGui import QBitmap, QColor, QCursor, QDesktopServices, QFont, QFontMetrics, QGuiApplication, QMouseEvent, QPainter, QPen, QPixmap, QRegion, QTransform
         from PySide6.QtWidgets import QApplication, QMenu, QWidget
         try:
             from .action_browser import ActionBrowser
@@ -317,6 +323,22 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
                 pass
             return False, 0
 
+    class StatusBubble(QWidget):
+        """An independent, input-transparent status card, never drag padding."""
+        def __init__(self, companion):
+            super().__init__(companion, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
+                             | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.WindowTransparentForInput
+                             | Qt.WindowType.WindowDoesNotAcceptFocus)
+            self.companion = companion
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+
+        def paintEvent(self, event):
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            self.companion._paint_status_card(painter)
+
     class CompanionWindow(QWidget):
         LABELS = {
             "IDLE": "休息中",
@@ -336,13 +358,13 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             self.raster_factor = 1.0
             configured_scale = os.environ.get("DSH_DAFEIYU_SCALE")
             try:
-                self.scale = min(1.4, max(0.55, float(configured_scale))) if configured_scale else self.layout["scale"]
+                self.scale = min(1.8, max(0.4, float(configured_scale))) if configured_scale else self.layout["scale"]
             except ValueError:
                 self.scale = self.layout["scale"]
             configured_bubble_scale = os.environ.get("DSH_DAFEIYU_BUBBLE_SCALE")
             try:
                 self.bubble_scale = (
-                    min(1.2, max(0.8, float(configured_bubble_scale)))
+                    min(1.6, max(0.6, float(configured_bubble_scale)))
                     if configured_bubble_scale
                     else self.layout["bubbleScale"]
                 )
@@ -360,6 +382,24 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             self.inertia_enabled = self.layout["inertiaEnabled"]
             self.gravity_enabled = self.layout["gravityEnabled"]
             self.edge_snap = self.layout["edgeSnap"]
+            self.perch_enabled = self.layout["perchEnabled"]
+            self.perch_scale = self.layout["perchScale"]
+            self.hover_enabled = self.layout["hoverEnabled"]
+            self.wander_enabled = self.layout["wanderEnabled"]
+            self.perched_edge: str | None = None
+            self.hovered = False
+            self.hover_card_active = False
+            self.hover_since_ms = 0
+            self.hover_clock_second = -1
+            self.hover_sentence = CARING_WORDS[0]
+            self.drag_tilt = 0.0
+            self.drag_fraction = (.5, .5)
+            self.drag_last_point: QPoint | None = None
+            self.watched_screen = None
+            self.display_refresh_pending = False
+            self.visible_rect_cache = {}
+            self.visual_bounds_key = None
+            self.visual_bounds = None
             configured_bubble_mode = os.environ.get("DSH_DAFEIYU_BUBBLE_MODE")
             self.bubble_mode = (
                 configured_bubble_mode
@@ -423,6 +463,10 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             self.dragging = False
             self.drag_trail = DragTrail()
             self.throw_motion: ThrowMotion | None = None
+            self.wander_motion: WanderMotion | None = None
+            self.last_touch_ms = self._now_ms()
+            self.wander_wait_until = self.last_touch_ms + random.randint(6000, 12000)
+            self.behavior_tick_ms = self.last_touch_ms
             self.last_tick_ms = self._now_ms()
             self.animation_timer = QTimer(self)
             self.animation_timer.setTimerType(Qt.TimerType.PreciseTimer)
@@ -435,6 +479,10 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             self.motion_timer.setInterval(16)
             self.motion_timer.timeout.connect(self._tick_motion)
             self.motion_tick = time.monotonic()
+            self.behavior_timer = QTimer(self)
+            self.behavior_timer.setInterval(50)
+            self.behavior_timer.timeout.connect(self._tick_behavior)
+            self.behavior_timer.start()
             if not self.reduced_motion:
                 self._schedule_micro()
             self.snapshot_saved = False
@@ -445,12 +493,19 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
                 | Qt.WindowType.Tool
             )
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            self.status_bubble = StatusBubble(self)
+            QApplication.instance().aboutToQuit.connect(self.status_bubble.hide)
             self._apply_window_size()
             QTimer.singleShot(0, self._restore_visible_position)
 
         def apply_message(self, message: dict[str, Any]) -> None:
             recorder.record(message)
             kind = message.get("kind")
+            if kind in {"state", "pulse"} and (kind == "pulse" or message.get("state") != "IDLE"):
+                self._stop_wander()
+                if kind == "pulse" or message.get("state") in {"WAITING", "ERROR", "SUCCESS"}:
+                    self._leave_perch()
+                self._set_hover(False, self._now_ms())
             if kind == "shutdown":
                 QApplication.quit()
                 return
@@ -530,6 +585,7 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             self.reduced_motion = enabled
             self.animation_timer.setInterval(self._animation_interval_ms())
             if enabled:
+                self._stop_wander()
                 self._stop_throw()
                 self.micro_timer.stop()
                 if not self.dragging:
@@ -550,10 +606,10 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
                 self.follow_codex = message["followCodex"]
             scale = message.get("scale")
             if isinstance(scale, (int, float)) and not isinstance(scale, bool):
-                self.scale = min(1.4, max(0.55, float(scale)))
+                self.scale = min(1.8, max(0.4, float(scale)))
             bubble_scale = message.get("bubbleScale")
             if isinstance(bubble_scale, (int, float)) and not isinstance(bubble_scale, bool):
-                self.bubble_scale = min(1.2, max(0.8, float(bubble_scale)))
+                self.bubble_scale = min(1.6, max(0.6, float(bubble_scale)))
             reduced_motion = message.get("reducedMotion")
             if isinstance(reduced_motion, bool) and reduced_motion != self.reduced_motion:
                 self._set_reduced_motion(reduced_motion)
@@ -593,6 +649,211 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             self.glove.pressed = False
             reset_native_cursor()
             super().leaveEvent(event)
+
+        def _set_hover(self, hovered: bool, now_ms: int) -> None:
+            if hovered != self.hovered:
+                self.hovered = hovered
+                self.hover_since_ms = now_ms
+                if hovered:
+                    self.hover_sentence = random.choice(CARING_WORDS)
+                    self._stop_wander()
+            if hovered:
+                self.last_touch_ms = now_ms
+            active = (hovered and self.hover_enabled and now_ms - self.hover_since_ms >= 550
+                      and self.model.base_state == "IDLE" and self.model.pulse_state is None
+                      and not self.dragging and self.throw_motion is None and not self.menu_open)
+            if active != self.hover_card_active:
+                self.hover_card_active = active
+                self._sync_bubble_size()
+            if active and now_ms // 1000 != self.hover_clock_second:
+                self.hover_clock_second = now_ms // 1000
+                self._update_status_bubble()
+                self.update()
+
+        def _pet_pixmap(self) -> QPixmap:
+            if self.perched_edge is None:
+                return self._pixmap(self.model.frame)
+            # Perching reuses our own idle head, not a different character's art.
+            source = self._pixmap(self.model.clips[self.model.state_map["IDLE"]].frames[0])
+            crop = head_crop(tuple(manifest.get("originalFrameRect", (0, 0, source.width(), source.height()))))
+            factor = self.raster_factor
+            head = source.copy(*(round(value * factor) for value in crop))
+            angle = 90 if self.perched_edge == "left" else -90
+            return head.transformed(QTransform().rotate(angle), Qt.TransformationMode.SmoothTransformation)
+
+        def _pet_contains(self, local: QPoint) -> bool:
+            x, y, width, height = self._pet_rect()
+            if not (x <= local.x() < x + width and y <= local.y() < y + height):
+                return False
+            pixmap = self._pet_pixmap()
+            px = min(pixmap.width() - 1, int((local.x() - x) * pixmap.width() / width))
+            py = min(pixmap.height() - 1, int((local.y() - y) * pixmap.height() / height))
+            return pixmap.toImage().pixelColor(px, py).alpha() >= 32
+
+        def _tick_behavior(self, now_ms: int | None = None, pointer: QPoint | None = None) -> None:
+            now_ms = self._now_ms() if now_ms is None else now_ms
+            elapsed = max(0, now_ms - self.behavior_tick_ms) / 1000
+            self.behavior_tick_ms = now_ms
+            pointer = QCursor.pos() if pointer is None else pointer
+            panels_open = self.settings_dialog is not None or self.action_browser is not None
+            can_hover = not (self.dragging or self.drag_origin is not None or self.menu_open or panels_open)
+            self._set_hover(can_hover and self._pet_contains(self.mapFromGlobal(pointer)), now_ms)
+            can_walk = (self.wander_enabled and not self.reduced_motion and not self.hovered
+                        and not self.dragging and self.drag_origin is None and self.throw_motion is None
+                        and self.perched_edge is None and not self.menu_open and not panels_open
+                        and self.model.base_state == "IDLE" and self.model.pulse_state is None
+                        and self.model.overlay_clip_name is None and now_ms - self.last_touch_ms >= 5000)
+            if not can_walk:
+                self._stop_wander()
+                return
+            if self.wander_motion is None:
+                if self.model.motion_clip_name is not None or now_ms < self.wander_wait_until:
+                    return
+                bounds = self._motion_bounds()
+                if bounds is None or bounds.right - bounds.left < 16:
+                    return
+                target = min(max(self.pet_x + random.choice((-1, 1)) * random.uniform(80, 200) * self.scale,
+                                 bounds.left), bounds.right)
+                if abs(target - self.pet_x) < 12:
+                    target = bounds.right if self.pet_x <= (bounds.left + bounds.right) / 2 else bounds.left
+                self.wander_motion = WanderMotion(self.pet_x, self.pet_y, target, bounds, 72 * self.scale)
+                self.micro_timer.stop()
+                walking = "extra_floating_steps" if "extra_floating_steps" in self.model.clips else self.model.base_clip_name
+                self._play_motion_animation(walking)
+            motion = self.wander_motion
+            motion.step(elapsed)
+            self._move_to_pet(round(motion.x), round(motion.y))
+            if not motion.active:
+                self._stop_wander()
+                self.wander_wait_until = now_ms + random.randint(4000, 9000)
+                self._save_layout()
+
+        def _stop_wander(self) -> None:
+            if self.wander_motion is None:
+                return
+            self.wander_motion = None
+            self.model.clear_motion()
+            self.wander_wait_until = self._now_ms() + random.randint(4000, 9000)
+            self._schedule_micro()
+            self.update()
+
+        def _try_perch(self) -> bool:
+            if (not self.perch_enabled or self.throw_motion is not None or self.model.pulse_state is not None
+                    or self.model.base_state not in {"IDLE", "DISCONNECTED", "THINKING", "WORKING"}):
+                return False
+            bounds = self._motion_bounds()
+            side = perch_side(self.pet_x, self._pet_size()[0], bounds, self.scale) if bounds else None
+            if side is None:
+                return False
+            self._enter_perch(side)
+            return True
+
+        def _enter_perch(self, side: str, *, save: bool = True) -> None:
+            if side not in {"left", "right"}:
+                return
+            screen = self._screen_for_point(self.pet_x + self._pet_size()[0] // 2, self.pet_y)
+            if screen is None:
+                return
+            self._stop_wander()
+            self.perched_edge = side
+            self.drag_tilt = 0
+            self._play_motion_animation(self.model.state_map["IDLE"])
+            self._apply_window_size()
+            geometry = screen.availableGeometry()
+            vx, _, vw, _ = self._pet_visible_rect()
+            x = geometry.left() - vx if side == "left" else geometry.x() + geometry.width() - vx - vw
+            self._move_to_pet(x, self.pet_y, screen_hint=screen)
+            self.micro_timer.stop()
+            if save:
+                self._save_layout()
+
+        def _leave_perch(self) -> None:
+            if self.perched_edge is None:
+                return
+            side = self.perched_edge
+            screen = self._screen_for_point(self.pet_x, self.pet_y)
+            self.perched_edge = None
+            self.model.advance(0, self._now_ms())
+            self.model.clear_motion()
+            self._apply_window_size()
+            x = self.pet_x
+            if screen:
+                geometry = screen.availableGeometry()
+                vx, _, vw, _ = self._pet_visible_rect()
+                x = geometry.left() - vx if side == "left" else geometry.x() + geometry.width() - vx - vw
+            self._move_to_pet(x, self.pet_y, screen_hint=screen)
+            self.last_touch_ms = self._now_ms()
+            self._schedule_micro()
+            self._save_layout()
+
+        def _screen_for_point(self, x: int, y: int):
+            screen = QApplication.screenAt(QPoint(x, y))
+            if screen is not None:
+                return screen
+            screens = QApplication.screens()
+            index = nearest_screen_index((x, y), [item.geometry().getRect() for item in screens])
+            return screens[index] if index is not None else None
+
+        def _connect_display_events(self) -> None:
+            handle = self.windowHandle()
+            if handle is None:
+                return
+            handle.screenChanged.connect(self._on_screen_changed)
+            QApplication.instance().screenAdded.connect(self._schedule_display_refresh)
+            QApplication.instance().screenRemoved.connect(self._schedule_display_refresh)
+            self._on_screen_changed(handle.screen())
+
+        def _on_screen_changed(self, screen: Any) -> None:
+            old = self.watched_screen
+            if old is not None:
+                for signal_name in ("logicalDotsPerInchChanged", "availableGeometryChanged", "geometryChanged"):
+                    try:
+                        getattr(old, signal_name).disconnect(self._schedule_display_refresh)
+                    except (RuntimeError, TypeError):
+                        pass
+            self.watched_screen = screen
+            if screen is not None:
+                for signal_name in ("logicalDotsPerInchChanged", "availableGeometryChanged", "geometryChanged"):
+                    getattr(screen, signal_name).connect(self._schedule_display_refresh)
+            self._schedule_display_refresh()
+
+        def _schedule_display_refresh(self, *args: Any) -> None:
+            if not self.display_refresh_pending:
+                self.display_refresh_pending = True
+                QTimer.singleShot(0, self._refresh_display)
+
+        def _refresh_display(self) -> None:
+            self.display_refresh_pending = False
+            self.decoded_frames.clear()
+            self._stop_wander()
+            self._apply_window_size()
+            screen = self._screen_for_point(self.pet_x + self._pet_size()[0] // 2, self.pet_y)
+            if self.dragging:
+                pointer = QCursor.pos()
+                screen = self._screen_for_point(pointer.x(), pointer.y())
+                width, height = self._pet_size()
+                x = round(pointer.x() - self.drag_fraction[0] * width)
+                y = round(pointer.y() - self.drag_fraction[1] * height)
+                self.drag_trail = DragTrail()  # A monitor coordinate jump is not throw velocity.
+            else:
+                x, y = self.pet_x, self.pet_y
+                if self.perched_edge and screen:
+                    geometry = screen.availableGeometry()
+                    vx, _, vw, _ = self._pet_visible_rect()
+                    x = geometry.x() - vx if self.perched_edge == "left" else geometry.x() + geometry.width() - vx - vw
+            self._move_to_pet(x, y, screen_hint=screen)
+            if self.throw_motion is not None:
+                bounds = self._motion_bounds()
+                if bounds:
+                    self.throw_motion.bounds = bounds
+                    self.throw_motion.x, self.throw_motion.y = bounds.clamp(self.pet_x, self.pet_y)
+            self.update()
+
+        def event(self, event: Any) -> bool:
+            result = super().event(event)
+            if event.type() == QEvent.Type.DevicePixelRatioChange and hasattr(self, "display_refresh_pending"):
+                self._schedule_display_refresh()
+            return result
 
         def _animation_interval_ms(self) -> int:
             if self.reduced_motion:
@@ -651,6 +912,9 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             self.update()
 
         def _play_idle_micro(self) -> None:
+            if self.hovered or self.perched_edge or self.wander_motion is not None:
+                self._schedule_micro()
+                return
             if self.reduced_motion:
                 return
             previous_frame = self.model.frame
@@ -671,6 +935,7 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             # Blending transparent sprites from different clips creates two
             # visible outlines even with correct frame clearing.
             self._pixmap(self.model.frame)
+            self._apply_window_size()
 
         def _play_motion_animation(
             self,
@@ -691,7 +956,10 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
         def _begin_drag(self) -> None:
             if self.dragging:
                 return
+            self._stop_wander()
+            self._leave_perch()
             self.dragging = True
+            self._set_hover(False, self._now_ms())
             self.micro_timer.stop()
             played = self._play_motion_animation("dragging", repaint=False)
             if not played:
@@ -709,7 +977,10 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             geometry = self._screen_geometry_at(self.pet_x + width // 2, self.pet_y + height // 2)
             if geometry is None:
                 return None
-            return Bounds.for_screen((geometry.x(), geometry.y(), geometry.width(), geometry.height()), (width, height))
+            vx, vy, vw, vh = self._pet_visible_rect()
+            return Bounds(geometry.x() - vx, geometry.y() - vy,
+                          max(geometry.x() - vx, geometry.x() + geometry.width() - vx - vw),
+                          max(geometry.y() - vy, geometry.y() + geometry.height() - vy - vh))
 
         def _snap_to_edge(self) -> None:
             bounds = self._motion_bounds()
@@ -718,6 +989,7 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
                 self._move_to_pet(round(x), round(y))
 
         def _start_throw(self, vx: float, vy: float) -> bool:
+            self._stop_wander()
             bounds = self._motion_bounds()
             if bounds is None or self.reduced_motion or not self.inertia_enabled or (vx == 0 and vy == 0):
                 return False
@@ -776,6 +1048,8 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
                 self.model.clear_motion()
             self._sync_frame_transition(previous_frame, previous_clip, allow_fade=False)
             self.dragging = False
+            self.drag_tilt = 0
+            self.last_touch_ms = now_ms
             self.last_tick_ms = now_ms
             self.animation_timer.start(self._animation_interval_ms())
             if not self.reduced_motion:
@@ -789,6 +1063,10 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             self.micro_timer.start(self.model.overlay_remaining_ms + random.randint(lower, upper))
 
         def _bubble_visible(self) -> bool:
+            if self.perched_edge and not self.hover_card_active:
+                return False
+            if self.hover_card_active and self.bubble_mode != "hidden":
+                return True
             if self.bubble_mode == "hidden":
                 return False
             if self.bubble_mode == "always":
@@ -799,67 +1077,127 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             return state in self.bubble_states
 
         def _sync_bubble_size(self) -> None:
-            old_size = (self.width(), self.height())
             self._apply_window_size()
-            if (self.width(), self.height()) != old_size:
-                self._move_to_pet(self.pet_x, self.pet_y)
+
+        def _current_visual_rect(self) -> tuple[int, int, int, int]:
+            pixmap = self._pet_pixmap()
+            width, height = self._pet_size()
+            tilt = self.drag_tilt if self.dragging and not self.reduced_motion else 0
+            key = (self.model.frame, self.perched_edge, width, height, self.raster_factor, tilt)
+            if key != self.visual_bounds_key:
+                rect = QRegion(QBitmap.fromImage(pixmap.toImage().createAlphaMask(Qt.ImageConversionFlag.ThresholdDither))).boundingRect()
+                if rect.isEmpty():
+                    rect = pixmap.rect()
+                logical = QRectF(rect.x() * width / pixmap.width(), rect.y() * height / pixmap.height(),
+                                 rect.width() * width / pixmap.width(), rect.height() * height / pixmap.height())
+                if tilt:
+                    transform = QTransform().translate(width / 2, height * .55)
+                    transform.rotate(tilt)
+                    transform.translate(-width / 2, -height * .55)
+                    logical = transform.mapRect(logical)
+                logical = logical.adjusted(-2, -2, 2, 2).toAlignedRect()
+                self.visual_bounds = logical.getRect()
+                self.visual_bounds_key = key
+            return self.visual_bounds
 
         def _apply_window_size(self) -> None:
-            pet_width = round(int(manifest["maxFrameWidth"]) * self.scale)
-            pet_height = round(int(manifest["maxFrameHeight"]) * self.scale)
-            if self._bubble_visible():
-                bubble_width = round(420 * self.bubble_scale)
-                bubble_height = self._card_height()
-                self.setFixedSize(max(pet_width + 50, bubble_width + 28), pet_height + bubble_height + 34)
-            else:
-                self.setFixedSize(pet_width + 50, pet_height + 26)
+            # Preserve the shared animation anchor while fitting the native
+            # window to this frame. No sprite scaling or per-frame recentering.
+            x, y, width, height = self._current_visual_rect()
+            self.setFixedSize(width, height)
+            self.move(round(self.pet_x + x), round(self.pet_y + y))
+            self._update_status_bubble()
+
+        def _update_status_bubble(self) -> None:
+            bubble = getattr(self, "status_bubble", None)
+            if bubble is None:
+                return
+            if not self._bubble_visible() or self.menu_open or not self.isVisible():
+                bubble.hide()
+                return
+            _, _, width, height = self._bubble_rect()
+            bubble.setFixedSize(width + 16, height + 22)
+            vx, vy, vw, vh = self._current_visual_rect()
+            screen = self._screen_for_point(self.pet_x + vx + vw // 2, self.pet_y + vy + vh // 2)
+            if screen is None:
+                return
+            area = screen.availableGeometry()
+            left = round(self.pet_x + vx + vw / 2 - bubble.width() / 2)
+            top = round(self.pet_y + vy - bubble.height() - 5)
+            if top < area.y() + 3:
+                top = round(self.pet_y + vy + vh + 5)
+            left = min(max(left, area.x() + 3), max(area.x() + 3, area.x() + area.width() - bubble.width() - 3))
+            top = min(max(top, area.y() + 3), max(area.y() + 3, area.y() + area.height() - bubble.height() - 3))
+            bubble.move(left, top)
+            bubble.show()
+            card = self._current_card()
+            bubble.setToolTip("\n".join(card[:2]) if card else "")
+            bubble.update()
 
         def _screen_geometry_at(self, x: int, y: int):
-            screen = QApplication.screenAt(QPoint(x, y)) or QApplication.primaryScreen()
+            screen = self._screen_for_point(x, y)
             if screen is None:
                 return None
             return screen.availableGeometry()
 
         def _pet_size(self) -> tuple[int, int]:
+            if self.perched_edge:
+                _, _, head_width, head_height = head_crop(tuple(manifest.get("originalFrameRect", (0, 0, 412, 344))))
+                width = round(96 * self.scale * self.perch_scale)
+                return width, round(width * head_width / head_height)
             return (
                 round(int(manifest["maxFrameWidth"]) * self.scale),
                 round(int(manifest["maxFrameHeight"]) * self.scale),
             )
 
-        def _move_to_pet(self, pet_x: int, pet_y: int) -> None:
-            """Resize or move the container around the character's anchor."""
-            geometry = self._screen_geometry_at(pet_x, pet_y)
+        def _move_to_pet(self, pet_x: int, pet_y: int, *, screen_hint: Any = None) -> None:
+            """Place the logical pet anchor on the cursor's monitor during a drag."""
+            selected = screen_hint or self._screen_for_point(pet_x + self._pet_size()[0] // 2, pet_y)
+            geometry = selected.availableGeometry() if selected is not None else None
+            handle = self.windowHandle()
+            if handle is not None and selected is not None and handle.screen() != selected:
+                handle.setScreen(selected)
             screen = (geometry.x(), geometry.y(), geometry.width(), geometry.height()) if geometry is not None else None
-            window_x, window_y, self.pet_x, self.pet_y = position_window(
-                (pet_x, pet_y), self._pet_size(), (self.width(), self.height()), screen,
-                self._card_height() if self._bubble_visible() else 0,
-            )
-            self.move(window_x, window_y)
+            width, height = self._pet_size()
+            vx, vy, vw, vh = self._pet_visible_rect()
+            if geometry is not None:
+                pet_x = min(max(pet_x, geometry.x() - vx), max(geometry.x() - vx, geometry.x() + geometry.width() - vx - vw))
+                pet_y = min(max(pet_y, geometry.y() - vy), max(geometry.y() - vy, geometry.y() + geometry.height() - vy - vh))
+            self.pet_x, self.pet_y = round(pet_x), round(pet_y)
+            self._apply_window_size()
             self.update()
 
         def _pet_offset_x(self, pet_width: int) -> int:
-            return min(max(self.pet_x - self.x(), 0), self.width() - pet_width)
+            return self.pet_x - self.x()
 
         def _pet_rect(self) -> tuple[int, int, int, int]:
-            pet_width, pet_height = self._pet_size()
-            offset_y = min(max(self.pet_y - self.y(), 0), self.height() - pet_height)
-            return self._pet_offset_x(pet_width), offset_y, pet_width, pet_height
+            return self.pet_x - self.x(), self.pet_y - self.y(), *self._pet_size()
+
+        def _pet_visible_rect(self) -> tuple[int, int, int, int]:
+            """Stable idle silhouette bounds; transparent animation padding is not a wall."""
+            key = self.perched_edge
+            if key not in self.visible_rect_cache:
+                pixmap = (self._pet_pixmap() if key else
+                          self._pixmap(self.model.clips[self.model.state_map["IDLE"]].frames[0]))
+                rect = QRegion(QBitmap.fromImage(pixmap.toImage().createAlphaMask(Qt.ImageConversionFlag.ThresholdDither))).boundingRect()
+                if rect.isEmpty():
+                    rect = pixmap.rect()
+                self.visible_rect_cache[key] = (rect.x() / pixmap.width(), rect.y() / pixmap.height(),
+                                                rect.width() / pixmap.width(), rect.height() / pixmap.height())
+            width, height = self._pet_size()
+            x, y, w, h = self.visible_rect_cache[key]
+            return round(x * width), round(y * height), max(1, round(w * width)), max(1, round(h * height))
+
+        def _bubble_render_scale(self) -> float:
+            return self.bubble_scale * .8
 
         def _bubble_rect(self) -> tuple[int, int, int, int]:
-            card_width = round(420 * self.bubble_scale)
-            card_height = self._card_height()
-            pet_width, _ = self._pet_size()
-            pet_center_x = self._pet_offset_x(pet_width) + pet_width // 2
-            margin = 14
-            card_x = pet_center_x - card_width // 2
-            min_x = margin
-            max_x = self.width() - card_width - margin
-            if max_x < min_x:
-                max_x = min_x
-            card_x = min(max(card_x, min_x), max_x)
-            _, pet_y, _, pet_height = self._pet_rect()
-            card_y = bubble_top(pet_y, pet_height, card_height, self.height())
-            return card_x, card_y, card_width, card_height
+            # Match the visible character, not the 640-pixel animation canvas.
+            _, _, visible_width, _ = self._pet_visible_rect()
+            if self.perched_edge:
+                visible_width = round(220 * self.scale)
+            width = round(max(190, min(300, visible_width * 1.2)) * self.bubble_scale)
+            return 8, 6, width, self._card_height()
 
         def _restore_visible_position(self) -> None:
             pet_width, pet_height = self._pet_size()
@@ -883,7 +1221,11 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
                         return
                     pet_x = geometry.right() - pet_width - 24
                     pet_y = geometry.bottom() - pet_height - 24
-            self._move_to_pet(pet_x, pet_y)
+            preferred = next((screen for screen in QApplication.screens()
+                              if screen.name() == self.layout.get("displayName")), None)
+            self._move_to_pet(pet_x, pet_y, screen_hint=preferred)
+            if self.perch_enabled and self.layout.get("perchedEdge") in {"left", "right"}:
+                self._enter_perch(self.layout["perchedEdge"], save=False)
 
         def _save_layout(self) -> None:
             self.layout = {
@@ -901,6 +1243,12 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
                 "inertiaEnabled": self.inertia_enabled,
                 "gravityEnabled": self.gravity_enabled,
                 "edgeSnap": self.edge_snap,
+                "perchEnabled": self.perch_enabled,
+                "perchScale": self.perch_scale,
+                "hoverEnabled": self.hover_enabled,
+                "wanderEnabled": self.wander_enabled,
+                "perchedEdge": self.perched_edge,
+                "displayName": self.windowHandle().screen().name() if self.windowHandle() and self.windowHandle().screen() else "",
                 "activityLevel": self.activity_level,
                 "idleActions": self.idle_actions,
             }
@@ -939,6 +1287,10 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
 
         def _current_card(self) -> tuple[str, str, str] | None:
             now_ms = self._now_ms()
+            if self.hover_card_active and self.model.base_state == "IDLE" and self.model.pulse_state is None:
+                stamp = datetime.now()
+                weekday = "一二三四五六日"[stamp.weekday()]
+                return self.hover_sentence, stamp.strftime(f"%Y-%m-%d 周{weekday}  %H:%M:%S"), "IDLE"
             if self.overlay_message and (
                 self.overlay_deadline_ms is None or now_ms < self.overlay_deadline_ms
             ):
@@ -997,8 +1349,8 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             footer = 28 if self.balance_summary else 0
             if len(self.tasks) >= 2:
                 rows = min(len(self.tasks), 3)
-                return round((58 + rows * 26 + footer) * self.bubble_scale)
-            return round((84 + footer) * self.bubble_scale)
+                return round((58 + rows * 26 + footer) * self._bubble_render_scale())
+            return round((62 + footer) * self.bubble_scale)
 
         def _draw_card_background(
             self,
@@ -1038,10 +1390,10 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             s: float,
         ) -> None:
             title_font = QFont("Microsoft YaHei UI")
-            title_font.setPointSizeF(11.0 * max(1.0, s))
+            title_font.setPointSizeF(11.0 * max(.8, s))
             title_font.setWeight(QFont.Weight.DemiBold)
             detail_font = QFont("Microsoft YaHei UI")
-            detail_font.setPointSizeF(9.0 * max(1.0, s))
+            detail_font.setPointSizeF(9.0 * max(.8, s))
             text_x = card_x + round(16 * s)
             text_width = max(40, card_width - round(32 * s))
             painter.setFont(title_font)
@@ -1109,17 +1461,12 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
                     except Exception:
                         pass
 
-        def paintEvent(self, _event: Any) -> None:
-            painter = QPainter(self)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            # Enhanced frames already match the physical display size; smooth
-            # transforms also cover fractional scaling and the original mode.
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        def _paint_status_card(self, painter: QPainter) -> None:
             show_card = self._bubble_visible() and not self.menu_open
             card = self._current_card() if show_card else None
             card_x, card_y, card_width, card_height = self._bubble_rect()
-            s = self.bubble_scale
-            corner_radius = round(30 * s)
+            s = self._bubble_render_scale()
+            corner_radius = round(13 * s)
 
             if len(self.tasks) >= 2 and show_card:
                 self._draw_card_background(painter, card_x, card_y, card_width, card_height, corner_radius, s)
@@ -1127,56 +1474,34 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             elif card:
                 title, detail, card_state = card
                 self._draw_card_background(painter, card_x, card_y, card_width, card_height, corner_radius, s)
-                icon_center_x = card_x + card_width - round(39 * s)
-                icon_center_y = card_y + round(42 * s)
+                s = self.bubble_scale
+                icon_center_x = card_x + card_width - round(23 * s)
+                icon_center_y = card_y + round(30 * s)
                 painter.save()
                 painter.translate(icon_center_x, icon_center_y)
-                painter.scale(s, s)
+                painter.scale(.58 * s, .58 * s)
                 painter.translate(-icon_center_x, -icon_center_y)
                 self._draw_status_icon(painter, card_state, icon_center_x, icon_center_y)
                 painter.restore()
-
-                text_x = card_x + round(24 * s)
-                text_width = max(40, card_width - round(102 * s))
+                text_x = card_x + round(12 * s)
+                text_width = max(40, card_width - round(51 * s))
                 title_font = QFont("Microsoft YaHei UI")
-                title_font.setPointSizeF(11.0 * max(1.0, s))
+                title_font.setPointSizeF(9 * max(.9, s))
                 title_font.setWeight(QFont.Weight.DemiBold)
                 detail_font = QFont("Microsoft YaHei UI")
-                detail_font.setPointSizeF(9.0 * max(1.0, s))
-                painter.setFont(title_font)
-                painter.setPen(QColor("#25282D"))
-                title_text = QFontMetrics(title_font).elidedText(
-                    title,
-                    Qt.TextElideMode.ElideRight,
-                    text_width,
-                )
-                painter.drawText(
-                    text_x,
-                    card_y + round(15 * s),
-                    text_width,
-                    max(12, round(27 * s)),
-                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                    title_text,
-                )
-                painter.setFont(detail_font)
-                painter.setPen(QColor("#747981"))
-                detail_text = QFontMetrics(detail_font).elidedText(
-                    detail,
-                    Qt.TextElideMode.ElideRight,
-                    text_width,
-                )
-                painter.drawText(
-                    text_x,
-                    card_y + round(43 * s),
-                    text_width,
-                    max(12, round(24 * s)),
-                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                    detail_text,
-                )
+                detail_font.setPointSizeF(8 * max(.9, s))
+                for text, font, color, y, height in (
+                        (title, title_font, "#25282D", 7, 23),
+                        (detail, detail_font, "#747981", 31, 20)):
+                    painter.setFont(font)
+                    painter.setPen(QColor(color))
+                    text = QFontMetrics(font).elidedText(text, Qt.TextElideMode.ElideRight, text_width)
+                    painter.drawText(text_x, card_y + round(y * s), text_width, round(height * s),
+                                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
 
             if self.balance_summary and show_card:
                 balance_font = QFont("Microsoft YaHei UI")
-                balance_font.setPointSizeF(9.0 * max(1.0, s))
+                balance_font.setPointSizeF(9.0 * max(.8, s))
                 painter.setFont(balance_font)
                 painter.setPen(QColor("#53616F"))
                 text_width = card_width - round(32 * s)
@@ -1184,14 +1509,30 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
                 painter.drawText(card_x + round(16 * s), card_y + card_height - round(31 * s),
                                  text_width, round(23 * s), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
 
-            pixmap = self._pixmap(self.model.frame)
+        def paintEvent(self, _event: Any) -> None:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            pixmap = self._pet_pixmap()
 
             # Pixel density changes the backing raster, never the logical size.
             x, y, pw, ph = self._pet_rect()
+            painter.save()
+            if self.dragging and not self.reduced_motion:
+                painter.translate(x + pw / 2, y + ph * .55)
+                painter.rotate(self.drag_tilt)
+                painter.translate(-x - pw / 2, -y - ph * .55)
             painter.drawPixmap(QRectF(x, y, pw, ph), pixmap, QRectF(0, 0, pixmap.width(), pixmap.height()))
+            painter.restore()
 
         def mousePressEvent(self, event: QMouseEvent) -> None:
             if event.button() == Qt.MouseButton.LeftButton:
+                self._stop_wander()
+                self.last_touch_ms = self._now_ms()
+                x, y, width, height = self._pet_rect()
+                self.drag_fraction = ((.5, .39) if self.perched_edge else
+                                      ((event.position().x() - x) / width, (event.position().y() - y) / height))
+                self.drag_last_point = event.globalPosition().toPoint()
                 self._stop_throw(landing=False)
                 self._apply_glove(True)
                 self.drag_origin = event.globalPosition().toPoint()
@@ -1205,8 +1546,16 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
                 self.drag_trail.add(time.monotonic(), event.globalPosition().x(), event.globalPosition().y())
                 if not self.dragging and (event.globalPosition().toPoint() - self.drag_origin).manhattanLength() > 5:
                     self._begin_drag()
-                delta = event.globalPosition().toPoint() - self.drag_origin
-                self._move_to_pet(self.pet_origin.x() + delta.x(), self.pet_origin.y() + delta.y())
+                if not self.dragging:
+                    return
+                point = event.globalPosition().toPoint()
+                if self.drag_last_point is not None:
+                    self.drag_tilt = max(-12.0, min(12.0, (point.x() - self.drag_last_point.x()) * .25))
+                self.drag_last_point = point
+                width, height = self._pet_size()
+                self._move_to_pet(round(point.x() - self.drag_fraction[0] * width),
+                                  round(point.y() - self.drag_fraction[1] * height),
+                                  screen_hint=self._screen_for_point(point.x(), point.y()))
 
         def mouseReleaseEvent(self, event: QMouseEvent) -> None:
             if event.button() == Qt.MouseButton.LeftButton:
@@ -1215,7 +1564,8 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
                     self.drag_trail.add(now, event.globalPosition().x(), event.globalPosition().y())
                     vx, vy = self.drag_trail.velocity(now)
                     self._finish_drag()
-                    if not self._start_throw(vx, vy):
+                    perched = vx == 0 and vy == 0 and self._try_perch()
+                    if not perched and not self._start_throw(vx, vy):
                         self._snap_to_edge()
                     self._save_layout()
                 else:
@@ -1223,6 +1573,8 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             self.drag_origin = None
             self.pet_origin = None
             self.dragging = False
+            self.drag_tilt = 0
+            self.last_touch_ms = self._now_ms()
             # The button state is authoritative: restore the open hand if the
             # pointer is still over the pet, or the default arrow otherwise.
             self.glove.pressed = False
@@ -1248,6 +1600,9 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
                 self._play_interaction("poke", "戳我干嘛，任务还在跑呢")
 
         def _play_interaction(self, clip_name: str, message: str) -> None:
+            self._stop_wander()
+            self._leave_perch()
+            self.last_touch_ms = self._now_ms()
             previous_frame, previous_clip = self.model.frame, self.model.active_clip_name
             if not self.reduced_motion and not self.model.play_interaction(clip_name, self._now_ms()):
                 return
@@ -1267,6 +1622,9 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             if self.reduced_motion:
                 self._show_overlay("先关闭“减少动态”就能看动作啦", self.status_detail, self.status_state, 2500)
                 return False
+            self._stop_wander()
+            self._leave_perch()
+            self.last_touch_ms = self._now_ms()
             previous_frame, previous_clip = self.model.frame, self.model.active_clip_name
             if self.throw_motion is not None or not self.model.play_manual_action(name, repeat=repeat):
                 self._show_overlay("先处理眼前的任务，等会儿再玩哦", self.status_detail, self.status_state, 2500)
@@ -1278,6 +1636,7 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             return True
 
         def _show_control_panel(self, dialog: Any) -> None:
+            self._stop_wander()
             screen = self.screen()
             if screen:
                 geometry = screen.availableGeometry()
@@ -1313,11 +1672,14 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             if name == "reduced_motion":
                 self._set_reduced_motion(bool(value))
                 emit_reply("settings", reducedMotion=self.reduced_motion)
-            elif name in {"scale", "bubble_scale"}:
+            elif name in {"scale", "bubble_scale", "perch_scale"}:
                 setattr(self, name, value)
                 self._apply_window_size()
                 self._move_to_pet(self.pet_x, self.pet_y)
-                emit_reply("settings", **{"scale" if name == "scale" else "bubbleScale": value})
+                if self.perched_edge:
+                    self._refresh_display()
+                key = {"scale": "scale", "bubble_scale": "bubbleScale", "perch_scale": "perchScale"}[name]
+                emit_reply("settings", **{key: value})
             elif name == "activity_level":
                 self.activity_level = value
                 self._schedule_micro()
@@ -1334,6 +1696,14 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
                 self.gravity_enabled = bool(value)
                 if self.throw_motion is not None:
                     self.throw_motion.gravity_enabled = self.gravity_enabled
+            elif name in {"perch_enabled", "hover_enabled", "wander_enabled"}:
+                setattr(self, name, bool(value))
+                if name == "perch_enabled" and not value:
+                    self._leave_perch()
+                if name == "wander_enabled" and not value:
+                    self._stop_wander()
+                if name == "hover_enabled" and not value:
+                    self._set_hover(False, self._now_ms())
             elif name == "edge_snap":
                 self.edge_snap = bool(value)
             else:
@@ -1342,6 +1712,9 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             self.update()
 
         def _go_home(self) -> None:
+            self._stop_wander()
+            self._leave_perch()
+            self.last_touch_ms = self._now_ms()
             self._stop_throw(landing=False)
             screen = QApplication.primaryScreen()
             if screen:
@@ -1371,13 +1744,17 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
             return QPoint(x, y)
 
         def contextMenuEvent(self, event: Any) -> None:
+            self._stop_wander()
+            self.last_touch_ms = self._now_ms()
             menu = self._build_context_menu()
             self.menu_open = True
+            self._update_status_bubble()
             self.update()
             try:
                 menu.exec(self._context_menu_position(menu, event.globalPos()))
             finally:
                 self.menu_open = False
+                self._update_status_bubble()
                 self.update()
                 menu.deleteLater()
 
@@ -1401,6 +1778,7 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
                 self._sync_bubble_size()
                 self.update()
 
+    QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     application = QApplication(sys.argv[:1])
     application.setQuitOnLastWindowClosed(False)
     inbox = Inbox()
@@ -1430,6 +1808,8 @@ def run_visual(recorder: EventRecorder, snapshot_path: Path | None = None) -> in
     reader = threading.Thread(target=read_stdin, name="dsh-bigfish-stdin", daemon=True)
     reader.start()
     window.show()
+    window._update_status_bubble()
+    window._connect_display_events()
     emit_reply("ready")
     code = application.exec()
     recorder.close()

@@ -22,6 +22,10 @@
 - `assets/sounds/` 提示音为上游项目程序生成的原创音频，沿用其 MIT 授权，不含第三方录音。
 - `runtime/ui-icons/` 勾选与下拉箭头为项目绘制 SVG，沿用代码许可。
 
+## 交互参考
+
+拖拽倾斜、旋转裁剪头部扒边、悬停提示和空闲溜达的交互设计参考 [duhaoze2007/Baifanyu-For-Win](https://github.com/duhaoze2007/Baifanyu-For-Win)，固定提交 `f92cbe942e154ee2971e8fa7e93d1061a302c2c1`。该项目代码的 MIT 版权和完整许可保留在 `assets/community-notices/Baifanyu-For-Win-LICENSE.txt`。本项目使用自身已有动画实现这些效果，未引入该项目的立绘、图标或声音。详细适配见 `docs/interaction-reference.md`。
+
 ## 便携运行库
 
 Windows Release 包含 Python 3.12.10、PySide6 Essentials / Qt 6.12、Shiboken6 和 Pillow 13.0.0。下载来源与摘要见 `RUNTIME-SOURCES.json`；许可证随 `.windows-runtime/LICENSE.txt` 和各依赖的 license/dist-info 目录提供。

@@ -53,7 +53,7 @@ for line in sys.stdin:
                     children.append(child)
                     return child
 
-                argv = ['codex_companion.py', '--codex-home', str(root), '--duration', '0.5']
+                argv = ['codex_companion.py', '--codex-home', str(root), '--duration', '5']
                 if not initial_follow:
                     argv.append('--standalone')
                 errors = io.StringIO()

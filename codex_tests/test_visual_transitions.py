@@ -20,6 +20,7 @@ def probe():
             window = next(w for w in app.topLevelWidgets() if w.__class__.__name__ == 'CompanionWindow')
             window.animation_timer.stop()
             window.micro_timer.stop()
+            window.behavior_timer.stop()
             from PIL import Image
 
             def bounds():

@@ -9,6 +9,7 @@ def position_window(
     window_size: tuple[int, int],
     screen: tuple[int, int, int, int] | None,
     card_height: int = 0,
+    visible_rect: tuple[int, int, int, int] | None = None,
 ) -> tuple[int, int, int, int]:
     """Return window x/y and pet x/y, clamping the pet only at screen edges.
 
@@ -24,12 +25,15 @@ def position_window(
         return pet_x - center_offset, pet_y - top_offset, pet_x, pet_y
 
     left, top, screen_width, screen_height = screen
-    pet_x = min(max(pet_x, left), max(left, left + screen_width - pet_width))
-    pet_y = min(max(pet_y, top), max(top, top + screen_height - pet_height))
+    vx, vy, vw, vh = visible_rect or (0, 0, pet_width, pet_height)
+    pet_x = min(max(pet_x, left - vx), max(left - vx, left + screen_width - vx - vw))
+    pet_y = min(max(pet_y, top - vy), max(top - vy, top + screen_height - vy - vh))
     if card_height and pet_y - card_height - 26 < top:
         top_offset = 8
-    window_x = min(max(pet_x - center_offset, left), max(left, left + screen_width - width))
-    window_y = min(max(pet_y - top_offset, top), max(top, top + screen_height - height))
+    window_x = min(max(pet_x - center_offset, left - vx),
+                   max(left - vx, left + screen_width - width + pet_width - vx - vw))
+    window_y = min(max(pet_y - top_offset, top - vy),
+                   max(top - vy, top + screen_height - height + pet_height - vy - vh))
     return window_x, window_y, pet_x, pet_y
 
 
